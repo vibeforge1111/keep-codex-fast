@@ -41,7 +41,9 @@ class SessionCandidate:
     title: str
     source: Path
     relative: Path
+    created_at: int | None
     updated_at: int | None
+    reason: str
 
 
 @dataclass
@@ -489,30 +491,74 @@ def active_session_candidates(
     conn: sqlite3.Connection,
     codex_home: Path,
     archive_older_than_days: int,
+    archive_age_field: str,
+    archive_thread_ids: list[str],
+    archive_rollout_paths: list[str],
 ) -> list[SessionCandidate]:
     sessions_root = codex_home / "sessions"
     sessions_root_canonical = canonical_path(sessions_root)
     cutoff = int((datetime.now() - timedelta(days=archive_older_than_days)).timestamp())
     pinned = load_pinned(codex_home)
+    target_thread_ids = {value.lower() for value in archive_thread_ids}
+    target_rollout_paths = {str(canonical_path(Path(value))) for value in archive_rollout_paths}
     rows = conn.execute(
-        "select id, title, rollout_path, updated_at from threads where archived_at is null"
+        "select id, title, rollout_path, created_at, updated_at from threads where archived_at is null"
     ).fetchall()
-    candidates: list[SessionCandidate] = []
-    for thread_id, title, rollout_path, updated_at in rows:
-        if thread_id in pinned or not rollout_path:
-            continue
-        if updated_at is not None and int(updated_at) >= cutoff:
+    candidates_by_id: dict[str, SessionCandidate] = {}
+    found_thread_ids: set[str] = set()
+    found_rollout_paths: set[str] = set()
+    for thread_id, title, rollout_path, created_at, updated_at in rows:
+        thread_id = str(thread_id)
+        if not rollout_path:
             continue
         source = Path(rollout_path)
+        canonical_source = str(canonical_path(source))
+        targeted_by_thread = thread_id.lower() in target_thread_ids
+        targeted_by_path = canonical_source in target_rollout_paths
+        if targeted_by_thread:
+            found_thread_ids.add(thread_id.lower())
+        if targeted_by_path:
+            found_rollout_paths.add(canonical_source)
+        if thread_id in pinned:
+            if targeted_by_thread or targeted_by_path:
+                report(f"targeted_session_skipped_pinned thread_id={thread_id}")
+            continue
+        age_value = created_at if archive_age_field == "created_at" else updated_at
+        reason = f"{archive_age_field}_older_than_{archive_older_than_days}d"
+        if updated_at is not None and int(updated_at) >= cutoff:
+            if not targeted_by_thread and not targeted_by_path and archive_age_field == "updated_at":
+                continue
+        if age_value is not None and int(age_value) >= cutoff and not targeted_by_thread and not targeted_by_path:
+            continue
+        if targeted_by_thread:
+            reason = "target_thread_id"
+        elif targeted_by_path:
+            reason = "target_rollout_path"
         if not source.exists():
+            if targeted_by_thread or targeted_by_path:
+                report(f"targeted_session_skipped_missing_rollout thread_id={thread_id}")
             continue
         try:
             relative = canonical_path(source).relative_to(sessions_root_canonical)
         except ValueError:
+            if targeted_by_thread or targeted_by_path:
+                report(f"targeted_session_skipped_outside_sessions thread_id={thread_id}")
             continue
-        candidates.append(
-            SessionCandidate(source.stat().st_size, thread_id, title or "", source, relative, updated_at)
+        candidates_by_id[thread_id] = SessionCandidate(
+            source.stat().st_size,
+            thread_id,
+            title or "",
+            source,
+            relative,
+            created_at,
+            updated_at,
+            reason,
         )
+    for target in sorted(target_thread_ids - found_thread_ids):
+        report(f"targeted_session_missing thread_id={target}")
+    for target in sorted(target_rollout_paths - found_rollout_paths):
+        report(f"targeted_session_missing rollout_path={target}")
+    candidates = list(candidates_by_id.values())
     candidates.sort(key=lambda item: item.size, reverse=True)
     return candidates
 
@@ -532,7 +578,10 @@ def archive_sessions(
     for index, item in enumerate(candidates[:10], start=1):
         label = f"session_{index:03d}"
         if details:
-            report(f"large_session_mb {mb(item.size)} {label} thread_id={item.thread_id} title={item.title[:70]}")
+            report(
+                f"large_session_mb {mb(item.size)} {label} thread_id={item.thread_id} "
+                f"reason={item.reason} title={item.title[:70]}"
+            )
         else:
             report(f"large_session_mb {mb(item.size)} {label}")
     if not apply or not candidates:
@@ -553,6 +602,9 @@ def archive_sessions(
                 "bytes": item.size,
                 "from": str(item.source),
                 "to": str(dest),
+                "reason": item.reason,
+                "created_at": item.created_at,
+                "updated_at": item.updated_at,
             }
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
             cur.execute(
@@ -783,7 +835,14 @@ def run(args: argparse.Namespace) -> int:
             title_limit=args.thread_title_limit,
             preview_limit=args.thread_preview_limit,
         )
-        candidates = active_session_candidates(conn, codex_home, args.archive_older_than_days)
+        candidates = active_session_candidates(
+            conn,
+            codex_home,
+            args.archive_older_than_days,
+            args.archive_age_field,
+            args.archive_thread_id,
+            args.archive_rollout_path,
+        )
         archive_sessions(conn, candidates, codex_home, backup_root, stamp, effective_apply, args.details)
         if effective_apply:
             conn.commit()
@@ -827,6 +886,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--codex-home", help="Override Codex home. Defaults to CODEX_HOME or ~/.codex.")
     parser.add_argument("--backup-root", help="Override backup output folder.")
     parser.add_argument("--archive-older-than-days", type=int, default=10)
+    parser.add_argument(
+        "--archive-age-field",
+        choices=["updated_at", "created_at"],
+        default="updated_at",
+        help="Timestamp field used by --archive-older-than-days. Defaults to updated_at.",
+    )
+    parser.add_argument(
+        "--archive-thread-id",
+        action="append",
+        default=[],
+        help="Archive one active session by thread id, bypassing the age threshold. Can be repeated.",
+    )
+    parser.add_argument(
+        "--archive-rollout-path",
+        action="append",
+        default=[],
+        help="Archive one active session by rollout JSONL path, bypassing the age threshold. Can be repeated.",
+    )
     parser.add_argument("--worktree-older-than-days", type=int, default=7)
     parser.add_argument("--rotate-logs-above-mb", type=int, default=64)
     parser.add_argument(
@@ -849,6 +926,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.apply and args.backup_only:
         parser.error("--apply and --backup-only cannot be used together")
+    for thread_id in args.archive_thread_id:
+        if not THREAD_ID_RE.fullmatch(thread_id):
+            parser.error(f"--archive-thread-id must be a UUID-like thread id: {thread_id}")
+    if args.archive_older_than_days < 0:
+        parser.error("--archive-older-than-days must be non-negative")
     if args.thread_title_limit < 20:
         parser.error("--thread-title-limit must be at least 20")
     if args.thread_preview_limit < args.thread_title_limit:

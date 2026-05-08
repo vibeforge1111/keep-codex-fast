@@ -63,6 +63,24 @@ python scripts/keep_codex_fast.py
 python scripts/keep_codex_fast.py --apply --archive-older-than-days 10 --worktree-older-than-days 7
 ```
 
+If the user has just created a handoff inside an old chat, explain that `--archive-older-than-days` uses `updated_at` by default. Use `--archive-age-field created_at` when the user's intent is "archive chats created before the threshold even if a recent handoff updated them":
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-older-than-days 10 --archive-age-field created_at
+```
+
+If the user wants to archive exactly one confirmed session, use a targeted archive instead of a broad `--archive-older-than-days 0` sweep:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-thread-id THREAD_ID
+```
+
+or:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-rollout-path /path/to/rollout.jsonl
+```
+
 7. Verify after applying:
 
 ```bash
@@ -80,6 +98,8 @@ If the user wants automation and the Codex app automation tool is available, cre
 
 - Backs up important metadata to `~/Documents/Codex/codex-backups/keep-codex-fast-*`.
 - Archives old non-pinned sessions to `~/.codex/archived_sessions/`.
+- Uses `updated_at` for age-based session archiving by default, or `created_at` with `--archive-age-field created_at`.
+- Supports targeted session archiving with `--archive-thread-id` or `--archive-rollout-path`, still backup-first and archive-only.
 - Normalizes Windows extended paths like `\\?\C:\...` inside local SQLite text fields.
 - Prunes missing/temp project blocks from `config.toml` and writes UTF-8 without BOM.
 - Moves stale worktrees to `~/.codex/archived_worktrees/`.

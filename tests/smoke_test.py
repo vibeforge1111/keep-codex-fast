@@ -56,18 +56,19 @@ def make_fake_home(root: Path) -> dict[str, Path]:
     state_db = codex_home / "state_5.sqlite"
     conn = sqlite3.connect(state_db)
     conn.execute(
-        "create table threads (id text primary key, title text, first_user_message text, rollout_path text, cwd text, updated_at integer, archived_at integer, archived integer)"
+        "create table threads (id text primary key, title text, first_user_message text, rollout_path text, cwd text, created_at integer, updated_at integer, archived_at integer, archived integer)"
     )
     long_title = "Title " + ("x" * 300)
     long_preview = "Preview " + ("y" * 600)
     conn.execute(
-        "insert into threads values (?,?,?,?,?,?,?,?)",
+        "insert into threads values (?,?,?,?,?,?,?,?,?)",
         (
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             long_title,
             long_preview,
             str(rollout),
             r"\\?\C:\DefinitelyMissingKeepCodexFast",
+            int(old_time),
             int(old_time),
             None,
             0,
@@ -97,6 +98,9 @@ def assert_report_mode(module) -> None:
             codex_home=str(paths["codex_home"]),
             backup_root=str(backup),
             archive_older_than_days=10,
+            archive_age_field="updated_at",
+            archive_thread_id=[],
+            archive_rollout_path=[],
             worktree_older_than_days=7,
             rotate_logs_above_mb=0,
             thread_title_limit=120,
@@ -135,6 +139,9 @@ def assert_backup_only_mode(module) -> None:
             codex_home=str(paths["codex_home"]),
             backup_root=str(backup),
             archive_older_than_days=10,
+            archive_age_field="updated_at",
+            archive_thread_id=[],
+            archive_rollout_path=[],
             worktree_older_than_days=7,
             rotate_logs_above_mb=0,
             thread_title_limit=120,
@@ -173,10 +180,70 @@ def assert_session_alias_detection(module) -> None:
         alias_home = alias_root / ".codex"
         conn = module.sqlite_connect(alias_home / "state_5.sqlite", readonly=True)
         try:
-            candidates = module.active_session_candidates(conn, alias_home, 10)
+            candidates = module.active_session_candidates(conn, alias_home, 10, "updated_at", [], [])
         finally:
             conn.close()
         assert len(candidates) == 1
+
+
+def assert_created_at_archive_field(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        now = int(time.time())
+        old = now - 30 * 86400
+        conn = sqlite3.connect(paths["state_db"])
+        conn.execute(
+            "update threads set created_at=?, updated_at=? where id=?",
+            (old, now, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        )
+        conn.commit()
+
+        updated_candidates = module.active_session_candidates(
+            conn,
+            paths["codex_home"],
+            10,
+            "updated_at",
+            [],
+            [],
+        )
+        created_candidates = module.active_session_candidates(
+            conn,
+            paths["codex_home"],
+            10,
+            "created_at",
+            [],
+            [],
+        )
+        conn.close()
+
+        assert updated_candidates == []
+        assert len(created_candidates) == 1
+        assert created_candidates[0].reason == "created_at_older_than_10d"
+
+
+def assert_targeted_session_archive(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        now = int(time.time())
+        conn = sqlite3.connect(paths["state_db"])
+        conn.execute(
+            "update threads set created_at=?, updated_at=? where id=?",
+            (now, now, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        )
+        conn.commit()
+
+        candidates = module.active_session_candidates(
+            conn,
+            paths["codex_home"],
+            10,
+            "updated_at",
+            ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+            [],
+        )
+        conn.close()
+
+        assert len(candidates) == 1
+        assert candidates[0].reason == "target_thread_id"
 
 
 def assert_apply_mode(module) -> None:
@@ -191,6 +258,9 @@ def assert_apply_mode(module) -> None:
             codex_home=str(paths["codex_home"]),
             backup_root=str(backup),
             archive_older_than_days=10,
+            archive_age_field="updated_at",
+            archive_thread_id=[],
+            archive_rollout_path=[],
             worktree_older_than_days=7,
             rotate_logs_above_mb=0,
             thread_title_limit=120,
@@ -240,6 +310,9 @@ def assert_normal_apply_does_not_repair_thread_metadata(module) -> None:
             codex_home=str(paths["codex_home"]),
             backup_root=str(backup),
             archive_older_than_days=10,
+            archive_age_field="updated_at",
+            archive_thread_id=[],
+            archive_rollout_path=[],
             worktree_older_than_days=7,
             rotate_logs_above_mb=64,
             thread_title_limit=120,
@@ -266,6 +339,8 @@ def main() -> int:
     assert_report_mode(module)
     assert_backup_only_mode(module)
     assert_session_alias_detection(module)
+    assert_created_at_archive_field(module)
+    assert_targeted_session_archive(module)
     assert_normal_apply_does_not_repair_thread_metadata(module)
     assert_apply_mode(module)
     print("smoke tests passed")

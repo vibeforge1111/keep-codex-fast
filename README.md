@@ -183,6 +183,24 @@ Apply core maintenance actions. This does not trim thread title/preview metadata
 python scripts/keep_codex_fast.py --apply --archive-older-than-days 10 --worktree-older-than-days 7
 ```
 
+By default, `--archive-older-than-days` uses the thread's last `updated_at` timestamp. If you created a handoff in an old chat and that recent update should not keep it active, use `created_at` instead:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-older-than-days 10 --archive-age-field created_at
+```
+
+Archive one known session without changing the broad age policy:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-thread-id 00000000-0000-0000-0000-000000000000
+```
+
+You can also target a rollout JSONL directly:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-rollout-path /path/to/rollout.jsonl
+```
+
 Optionally repair oversized title/preview metadata only when the report recommends it:
 
 ```bash
