@@ -85,6 +85,130 @@ def make_fake_home(root: Path) -> dict[str, Path]:
     }
 
 
+def make_malformed_local_task_home(root: Path, *, include_archived_column: bool = True) -> dict[str, Path]:
+    codex_home = root / ".codex"
+    sessions = codex_home / "sessions" / "2026" / "01" / "01"
+    sessions.mkdir(parents=True)
+    malformed_rollout = sessions / "rollout-2026-01-01T00-00-00-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jsonl"
+    temp_rollout = sessions / "rollout-2026-01-01T00-00-00-dddddddd-dddd-dddd-dddd-dddddddddddd.jsonl"
+    normal_rollout = sessions / "rollout-2026-01-01T00-00-01-cccccccc-cccc-cccc-cccc-cccccccccccc.jsonl"
+    malformed_rollout.write_text('{"type":"malformed"}\n', encoding="utf-8")
+    temp_rollout.write_text('{"type":"temp"}\n', encoding="utf-8")
+    normal_rollout.write_text('{"type":"normal"}\n', encoding="utf-8")
+
+    (codex_home / ".codex-global-state.json").write_text('{"pinned-thread-ids":[]}', encoding="utf-8")
+    state_db = codex_home / "state_5.sqlite"
+    conn = sqlite3.connect(state_db)
+    if include_archived_column:
+        conn.execute(
+            """
+            create table threads (
+                id text primary key,
+                title text,
+                first_user_message text,
+                rollout_path text,
+                cwd text,
+                updated_at integer,
+                archived_at integer,
+                archived integer,
+                has_user_event integer
+            )
+            """
+        )
+        insert_sql = "insert into threads values (?,?,?,?,?,?,?,?,?)"
+        malformed_values = (
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "<codex reminder>You are operating in text only mode.",
+            "",
+            str(malformed_rollout),
+            "/",
+            int(time.time()),
+            None,
+            0,
+            0,
+        )
+        normal_values = (
+            "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "Normal user thread",
+            "Normal user thread",
+            str(normal_rollout),
+            "/",
+            int(time.time()),
+            None,
+            0,
+            1,
+        )
+        temp_values = (
+            "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            "You are the Discover agent.",
+            "",
+            str(temp_rollout),
+            "/private/var/folders/aa/bb/T",
+            int(time.time()),
+            None,
+            0,
+            0,
+        )
+    else:
+        conn.execute(
+            """
+            create table threads (
+                id text primary key,
+                title text,
+                first_user_message text,
+                rollout_path text,
+                cwd text,
+                updated_at integer,
+                archived_at integer,
+                has_user_event integer
+            )
+            """
+        )
+        insert_sql = "insert into threads values (?,?,?,?,?,?,?,?)"
+        malformed_values = (
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "<codex reminder>You are operating in text only mode.",
+            "",
+            str(malformed_rollout),
+            "/",
+            int(time.time()),
+            None,
+            0,
+        )
+        normal_values = (
+            "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "Normal user thread",
+            "Normal user thread",
+            str(normal_rollout),
+            "/",
+            int(time.time()),
+            None,
+            1,
+        )
+        temp_values = (
+            "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            "You are the Discover agent.",
+            "",
+            str(temp_rollout),
+            "/private/var/folders/aa/bb/T",
+            int(time.time()),
+            None,
+            0,
+        )
+    conn.execute(insert_sql, malformed_values)
+    conn.execute(insert_sql, normal_values)
+    conn.execute(insert_sql, temp_values)
+    conn.commit()
+    conn.close()
+    return {
+        "codex_home": codex_home,
+        "malformed_rollout": malformed_rollout,
+        "temp_rollout": temp_rollout,
+        "normal_rollout": normal_rollout,
+        "state_db": state_db,
+    }
+
+
 def assert_report_mode(module) -> None:
     with tempfile.TemporaryDirectory() as td:
         paths = make_fake_home(Path(td))
@@ -261,12 +385,177 @@ def assert_normal_apply_does_not_repair_thread_metadata(module) -> None:
         assert not (backup / "restore-thread-metadata.py").exists()
 
 
+def assert_malformed_local_task_report_mode(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_malformed_local_task_home(Path(td))
+        args = argparse.Namespace(
+            apply=False,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(Path(td) / "backup-report"),
+            archive_older_than_days=10,
+            worktree_older_than_days=7,
+            rotate_logs_above_mb=64,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=False,
+            archive_malformed_local_tasks=False,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert module.run(args) == 0
+        text = output.getvalue()
+        assert "malformed_local_task_candidates 2" in text
+        assert "malformed_local_task_root_cwd 1" in text
+        assert "malformed_local_task_temp_cwd 1" in text
+        assert paths["malformed_rollout"].exists()
+        assert paths["temp_rollout"].exists()
+        assert paths["normal_rollout"].exists()
+
+
+def assert_malformed_local_task_archive_is_explicit(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_malformed_local_task_home(Path(td))
+        backup = Path(td) / "backup-apply"
+        args = argparse.Namespace(
+            apply=True,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(backup),
+            archive_older_than_days=99999,
+            worktree_older_than_days=99999,
+            rotate_logs_above_mb=64,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=False,
+            archive_malformed_local_tasks=False,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert module.run(args) == 0
+        assert "malformed_local_task_archive skipped_flag_required" in output.getvalue()
+        assert paths["malformed_rollout"].exists()
+        assert paths["temp_rollout"].exists()
+
+
+def assert_malformed_local_task_archive_mode(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_malformed_local_task_home(Path(td))
+        backup = Path(td) / "backup-apply"
+        args = argparse.Namespace(
+            apply=True,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(backup),
+            archive_older_than_days=99999,
+            worktree_older_than_days=99999,
+            rotate_logs_above_mb=64,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=False,
+            archive_malformed_local_tasks=True,
+        )
+        assert module.run(args) == 0
+
+        conn = sqlite3.connect(paths["state_db"])
+        malformed = conn.execute(
+            "select archived, archived_at, rollout_path from threads where id=?",
+            ("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",),
+        ).fetchone()
+        normal = conn.execute(
+            "select archived, archived_at, rollout_path from threads where id=?",
+            ("cccccccc-cccc-cccc-cccc-cccccccccccc",),
+        ).fetchone()
+        temp = conn.execute(
+            "select archived, archived_at, rollout_path from threads where id=?",
+            ("dddddddd-dddd-dddd-dddd-dddddddddddd",),
+        ).fetchone()
+        conn.close()
+
+        assert malformed[0] == 1
+        assert malformed[1] is not None
+        assert "archived_sessions" in malformed[2]
+        assert temp[0] == 1
+        assert temp[1] is not None
+        assert "archived_sessions" in temp[2]
+        assert normal[0] == 0
+        assert normal[1] is None
+        assert paths["normal_rollout"].exists()
+        assert not paths["malformed_rollout"].exists()
+        assert not paths["temp_rollout"].exists()
+        assert (backup / "moved-malformed-local-tasks.jsonl").exists()
+        assert (backup / "restore-malformed-local-tasks.py").exists()
+        assert not (backup / "restore-sessions.py").exists()
+
+
+def assert_malformed_local_task_archive_without_archived_column(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_malformed_local_task_home(Path(td), include_archived_column=False)
+        backup = Path(td) / "backup-apply"
+        args = argparse.Namespace(
+            apply=True,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(backup),
+            archive_older_than_days=99999,
+            worktree_older_than_days=99999,
+            rotate_logs_above_mb=64,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=False,
+            archive_malformed_local_tasks=True,
+        )
+        assert module.run(args) == 0
+
+        conn = sqlite3.connect(paths["state_db"])
+        malformed = conn.execute(
+            "select archived_at, rollout_path from threads where id=?",
+            ("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",),
+        ).fetchone()
+        normal = conn.execute(
+            "select archived_at, rollout_path from threads where id=?",
+            ("cccccccc-cccc-cccc-cccc-cccccccccccc",),
+        ).fetchone()
+        conn.close()
+
+        assert malformed[0] is not None
+        assert "archived_sessions" in malformed[1]
+        assert normal[0] is None
+
+        restore = backup / "restore-malformed-local-tasks.py"
+        assert restore.exists()
+        namespace = {"__name__": "__main__"}
+        exec(restore.read_text(encoding="utf-8"), namespace)
+
+        conn = sqlite3.connect(paths["state_db"])
+        restored = conn.execute(
+            "select archived_at, rollout_path from threads where id=?",
+            ("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",),
+        ).fetchone()
+        conn.close()
+        assert restored[0] is None
+        assert restored[1] == str(paths["malformed_rollout"])
+        assert paths["malformed_rollout"].exists()
+
+
 def main() -> int:
     module = load_module()
     assert_report_mode(module)
     assert_backup_only_mode(module)
     assert_session_alias_detection(module)
     assert_normal_apply_does_not_repair_thread_metadata(module)
+    assert_malformed_local_task_report_mode(module)
+    assert_malformed_local_task_archive_is_explicit(module)
+    assert_malformed_local_task_archive_mode(module)
+    assert_malformed_local_task_archive_without_archived_column(module)
     assert_apply_mode(module)
     print("smoke tests passed")
     return 0

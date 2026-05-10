@@ -15,6 +15,7 @@ The rule is simple:
 - **Inspect:** report-only, no writes.
 - **Maintain:** normal apply; backs up, archives old sessions, moves stale worktrees, rotates logs, prunes dead config, and normalizes paths. It does not trim thread title/preview metadata.
 - **Optional repair:** only with `--apply --repair-thread-metadata-bloat`; shortens oversized SQLite display title/preview metadata after backup. The transcript stays intact.
+- **Optional malformed-task archive:** only with `--apply --archive-malformed-local-tasks`; archives active no-user-event local task sessions with suspicious workspace roots such as `/` or OS temp folders.
 
 ## Who This Is For
 
@@ -37,6 +38,7 @@ It helps Codex:
 - back up important state before applying changes
 - archive old chats instead of deleting them
 - detect pathological thread title/preview metadata that can slow chat navigation
+- detect malformed active local-task sessions that can make Codex Desktop repeatedly log `No cwd found for local task`
 - move stale worktrees out of the hot path
 - rotate large logs
 - prune dead project references
@@ -120,6 +122,20 @@ The repair manifest stores the old full title/preview values so you can restore 
 
 If you are using the skill normally, this repair does not happen automatically. Treat it as an extra recommendation only when the report shows unusually large title/preview metadata.
 
+## Malformed Local Task Sessions
+
+Some app-server integrations can leave active local-task sessions that have no user event and point at a workspace root such as `/` or an OS temp directory. Codex Desktop may repeatedly try to resolve those sessions, log `No cwd found for local task`, and make the thread list sluggish.
+
+The script reports these candidates in report mode and normal apply mode. It does not archive them unless you explicitly opt in:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-malformed-local-tasks
+```
+
+With that flag, after backing up and only when Codex is not running, it moves the matching rollout JSONL files into `~/.codex/archived_sessions/`, marks those threads archived in SQLite, and writes a restore manifest/script.
+
+This does not target normal chats. The archive predicate requires `has_user_event=0`, an active/unarchived thread, a suspicious `cwd`, and a rollout file under `~/.codex/sessions`.
+
 ## Weekly Or Biweekly Reminder
 
 Recurring maintenance should be a reminder, not an automatic apply.
@@ -189,6 +205,12 @@ Optionally repair oversized title/preview metadata only when the report recommen
 python scripts/keep_codex_fast.py --apply --repair-thread-metadata-bloat
 ```
 
+Optionally archive malformed no-user-event local tasks when the report recommends it:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-malformed-local-tasks
+```
+
 Wait for Codex to exit before applying:
 
 ```bash
@@ -205,6 +227,7 @@ The skill can safely handle:
 - dead/temp project entries in `config.toml`
 - Windows `\\?\C:\...` path mismatches in local SQLite text fields
 - oversized thread title and first-message preview metadata in `state_5.sqlite`, only with `--repair-thread-metadata-bloat`
+- malformed no-user-event local task sessions, only with `--archive-malformed-local-tasks`
 
 It does not permanently delete chats, logs, or worktrees. It moves them into archive folders and writes backup/restore artifacts before applying changes.
 

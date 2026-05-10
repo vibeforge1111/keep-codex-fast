@@ -30,6 +30,15 @@ TEMP_PROJECT_RE = re.compile(
     r"(\\AppData\\Local\\Temp\\|/AppData/Local/Temp/|\\Temp\\codex-|/Temp/codex-|\\Temp\\spark-|/Temp/spark-)",
     re.I,
 )
+TEMP_LOCAL_TASK_CWD_RE = re.compile(
+    r"("
+    r"^/(?:private/)?var/folders/.+/T$"
+    r"|^/(?:tmp|var/tmp)(?:/|$)"
+    r"|^[A-Z]:\\Users\\[^\\]+\\AppData\\Local\\Temp(?:\\|$)"
+    r"|^\\\\\?\\[A-Z]:\\Users\\[^\\]+\\AppData\\Local\\Temp(?:\\|$)"
+    r")",
+    re.I,
+)
 DEFAULT_TITLE_LIMIT = 120
 DEFAULT_PREVIEW_LIMIT = 240
 
@@ -39,6 +48,18 @@ class SessionCandidate:
     size: int
     thread_id: str
     title: str
+    source: Path
+    relative: Path
+    updated_at: int | None
+
+
+@dataclass
+class MalformedLocalTaskCandidate:
+    size: int
+    thread_id: str
+    title: str
+    cwd: str
+    reason: str
     source: Path
     relative: Path
     updated_at: int | None
@@ -234,6 +255,10 @@ def has_threads_columns(conn: sqlite3.Connection, required: set[str]) -> bool:
     return required.issubset(table_columns(conn, "threads"))
 
 
+def active_unarchived_expr(columns: set[str]) -> str:
+    return "COALESCE(archived,0)=0" if "archived" in columns else "archived_at is null"
+
+
 def bounded_text(value: str, limit: int) -> str:
     text = " ".join(value.split())
     if len(text) <= limit:
@@ -265,7 +290,7 @@ def report_thread_metadata_bloat(
     if not {"id", "title"}.issubset(columns):
         report("thread_metadata_bloat skipped_missing_threads_columns")
         return
-    archived_expr = "COALESCE(archived,0)=0" if "archived" in columns else "archived_at is null"
+    archived_expr = active_unarchived_expr(columns)
     preview_col = "first_user_message" if "first_user_message" in columns else None
     if preview_col:
         row = conn.execute(
@@ -336,7 +361,7 @@ def repair_thread_metadata_bloat(
         return
     columns = table_columns(conn, "threads")
     has_preview = "first_user_message" in columns
-    archived_expr = "COALESCE(archived,0)=0" if "archived" in columns else "archived_at is null"
+    archived_expr = active_unarchived_expr(columns)
     select_preview = "first_user_message" if has_preview else "''"
     rows = conn.execute(
         f"""
@@ -517,6 +542,89 @@ def active_session_candidates(
     return candidates
 
 
+def malformed_local_task_reason(cwd: str) -> str | None:
+    if cwd == "/":
+        return "root_cwd"
+    if TEMP_LOCAL_TASK_CWD_RE.search(cwd):
+        return "temp_cwd"
+    return None
+
+
+def malformed_local_task_candidates(
+    conn: sqlite3.Connection,
+    codex_home: Path,
+) -> list[MalformedLocalTaskCandidate]:
+    columns = table_columns(conn, "threads")
+    required = {"id", "title", "rollout_path", "cwd", "updated_at", "has_user_event"}
+    missing = required - columns
+    if missing:
+        report(f"malformed_local_task_skipped_missing_columns {','.join(sorted(missing))}")
+        return []
+
+    sessions_root = codex_home / "sessions"
+    sessions_root_canonical = canonical_path(sessions_root)
+    pinned = load_pinned(codex_home)
+    active_expr = active_unarchived_expr(columns)
+    rows = conn.execute(
+        f"""
+        select id, title, rollout_path, cwd, updated_at
+        from threads
+        where {active_expr}
+          and COALESCE(has_user_event,0)=0
+          and rollout_path <> ''
+        """
+    ).fetchall()
+
+    candidates: list[MalformedLocalTaskCandidate] = []
+    for thread_id, title, rollout_path, cwd, updated_at in rows:
+        if thread_id in pinned:
+            continue
+        reason = malformed_local_task_reason(cwd or "")
+        if reason is None:
+            continue
+        source = Path(rollout_path)
+        if not source.exists():
+            continue
+        try:
+            relative = canonical_path(source).relative_to(sessions_root_canonical)
+        except ValueError:
+            continue
+        candidates.append(
+            MalformedLocalTaskCandidate(
+                source.stat().st_size,
+                thread_id,
+                title or "",
+                cwd or "",
+                reason,
+                source,
+                relative,
+                updated_at,
+            )
+        )
+    candidates.sort(key=lambda item: item.size, reverse=True)
+    return candidates
+
+
+def archive_thread_row(
+    cur: sqlite3.Cursor,
+    columns: set[str],
+    *,
+    rollout_path: str,
+    archived_at: int,
+    thread_id: str,
+) -> None:
+    if "archived" in columns:
+        cur.execute(
+            "update threads set rollout_path=?, archived=1, archived_at=? where id=?",
+            (rollout_path, archived_at, thread_id),
+        )
+    else:
+        cur.execute(
+            "update threads set rollout_path=?, archived_at=? where id=?",
+            (rollout_path, archived_at, thread_id),
+        )
+
+
 def archive_sessions(
     conn: sqlite3.Connection,
     candidates: list[SessionCandidate],
@@ -543,6 +651,7 @@ def archive_sessions(
     archive_root.mkdir(parents=True, exist_ok=True)
     now = int(time.time())
     cur = conn.cursor()
+    columns = table_columns(conn, "threads")
     with manifest.open("w", encoding="utf-8") as handle:
         for item in candidates:
             dest = archive_root / item.relative
@@ -555,17 +664,79 @@ def archive_sessions(
                 "to": str(dest),
             }
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-            cur.execute(
-                "update threads set rollout_path=?, archived=1, archived_at=? where id=?",
-                (str(dest), now, item.thread_id),
-            )
+            archive_thread_row(cur, columns, rollout_path=str(dest), archived_at=now, thread_id=item.thread_id)
     write_session_restore_script(manifest, codex_home / "state_5.sqlite", backup_root)
     report(f"archived_sessions_root {archive_root}")
     report(f"archived_sessions_manifest {manifest}")
 
 
-def write_session_restore_script(manifest: Path, state_db: Path, backup_root: Path) -> None:
-    restore = backup_root / "restore-sessions.py"
+def archive_malformed_local_tasks(
+    conn: sqlite3.Connection,
+    candidates: list[MalformedLocalTaskCandidate],
+    codex_home: Path,
+    backup_root: Path,
+    stamp: str,
+    apply: bool,
+    details: bool,
+) -> None:
+    total = sum(item.size for item in candidates)
+    root_count = sum(1 for item in candidates if item.reason == "root_cwd")
+    temp_count = sum(1 for item in candidates if item.reason == "temp_cwd")
+    report(f"malformed_local_task_candidates {len(candidates)}")
+    report(f"malformed_local_task_candidate_gb {gb(total)}")
+    report(f"malformed_local_task_root_cwd {root_count}")
+    report(f"malformed_local_task_temp_cwd {temp_count}")
+    for index, item in enumerate(candidates[:10], start=1):
+        label = f"malformed_task_{index:03d}"
+        if details:
+            report(
+                f"malformed_local_task_candidate {label} thread_id={item.thread_id} "
+                f"reason={item.reason} cwd={item.cwd} title={item.title[:70]}"
+            )
+        else:
+            report(f"malformed_local_task_candidate {label} reason={item.reason}")
+    if not apply or not candidates:
+        return
+
+    archive_root = codex_home / "archived_sessions" / f"malformed-local-tasks-{stamp}"
+    manifest = backup_root / "moved-malformed-local-tasks.jsonl"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    now = int(time.time())
+    cur = conn.cursor()
+    columns = table_columns(conn, "threads")
+    with manifest.open("w", encoding="utf-8") as handle:
+        for item in candidates:
+            dest = archive_root / item.relative
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(item.source), str(dest))
+            record = {
+                "thread_id": item.thread_id,
+                "bytes": item.size,
+                "reason": item.reason,
+                "cwd": item.cwd,
+                "from": str(item.source),
+                "to": str(dest),
+            }
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            archive_thread_row(cur, columns, rollout_path=str(dest), archived_at=now, thread_id=item.thread_id)
+    write_session_restore_script(
+        manifest,
+        codex_home / "state_5.sqlite",
+        backup_root,
+        restore_name="restore-malformed-local-tasks.py",
+    )
+    report(f"malformed_local_task_archive_root {archive_root}")
+    report(f"malformed_local_task_manifest {manifest}")
+
+
+def write_session_restore_script(
+    manifest: Path,
+    state_db: Path,
+    backup_root: Path,
+    *,
+    restore_name: str = "restore-sessions.py",
+) -> None:
+    restore = backup_root / restore_name
     restore.write_text(
         f'''import json
 import shutil
@@ -576,6 +747,7 @@ manifest = Path(r"{manifest}")
 db = Path(r"{state_db}")
 conn = sqlite3.connect(db)
 conn.execute("pragma busy_timeout=10000")
+columns = {{row[1] for row in conn.execute('pragma table_info("threads")')}}
 for line in manifest.read_text(encoding="utf-8").splitlines():
     rec = json.loads(line)
     src = Path(rec["to"])
@@ -584,10 +756,16 @@ for line in manifest.read_text(encoding="utf-8").splitlines():
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dest))
     if rec.get("thread_id"):
-        conn.execute(
-            "update threads set rollout_path=?, archived=0, archived_at=NULL where id=?",
-            (str(dest), rec["thread_id"]),
-        )
+        if "archived" in columns:
+            conn.execute(
+                "update threads set rollout_path=?, archived=0, archived_at=NULL where id=?",
+                (str(dest), rec["thread_id"]),
+            )
+        else:
+            conn.execute(
+                "update threads set rollout_path=?, archived_at=NULL where id=?",
+                (str(dest), rec["thread_id"]),
+            )
 conn.commit()
 conn.close()
 ''',
@@ -783,6 +961,18 @@ def run(args: argparse.Namespace) -> int:
             title_limit=args.thread_title_limit,
             preview_limit=args.thread_preview_limit,
         )
+        malformed_candidates = malformed_local_task_candidates(conn, codex_home)
+        archive_malformed_local_tasks(
+            conn,
+            malformed_candidates,
+            codex_home,
+            backup_root,
+            stamp,
+            effective_apply and getattr(args, "archive_malformed_local_tasks", False),
+            args.details,
+        )
+        if effective_apply and malformed_candidates and not getattr(args, "archive_malformed_local_tasks", False):
+            report("malformed_local_task_archive skipped_flag_required")
         candidates = active_session_candidates(conn, codex_home, args.archive_older_than_days)
         archive_sessions(conn, candidates, codex_home, backup_root, stamp, effective_apply, args.details)
         if effective_apply:
@@ -845,6 +1035,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--repair-thread-metadata-bloat",
         action="store_true",
         help="With --apply, trim oversized thread title/preview metadata. Default --apply only reports candidates.",
+    )
+    parser.add_argument(
+        "--archive-malformed-local-tasks",
+        action="store_true",
+        help=(
+            "With --apply, archive active no-user-event local task sessions with suspicious cwd values "
+            "such as / or OS temp folders. Default --apply only reports candidates."
+        ),
     )
     args = parser.parse_args(argv)
     if args.apply and args.backup_only:

@@ -33,6 +33,7 @@ There are three modes:
 - Inspect: report-only, no writes.
 - Maintain: normal `--apply`; backs up, archives old sessions, moves stale worktrees, rotates logs, prunes dead config, and normalizes paths. It does not trim thread title/preview metadata.
 - Optional repair: `--apply --repair-thread-metadata-bloat`; shortens oversized SQLite display title/preview metadata after backup. The rollout transcript stays intact.
+- Optional malformed-task archive: `--apply --archive-malformed-local-tasks`; archives active no-user-event local task sessions with suspicious workspace roots such as `/` or OS temp folders after backup.
 
 ## Default Workflow
 
@@ -48,6 +49,7 @@ python scripts/keep_codex_fast.py
    - archived session size
    - largest active sessions
    - thread metadata bloat: active title/preview character totals, max title/preview lengths, and over-limit counts
+   - malformed local task candidates: no-user-event active local tasks with suspicious workspace roots
    - stale worktree candidates
    - log size
    - bad Windows `\\?\` path counts
@@ -86,6 +88,7 @@ If the user wants automation and the Codex app automation tool is available, cre
 - Rotates `logs_2.sqlite*` into `~/.codex/archived_logs/` only when above the threshold.
 - Reports heavy Node processes without killing them.
 - Reports pathological active thread titles and `first_user_message` previews. It only repairs them when the user explicitly opts in with `--repair-thread-metadata-bloat`.
+- Reports malformed active local task sessions with `has_user_event=0` and suspicious `cwd` values. It only archives them when the user explicitly opts in with `--archive-malformed-local-tasks`.
 
 Report mode does none of those mutations. It only prints counts and pseudonymous candidates. Use `--details` when raw IDs, titles, or paths are needed for diagnosis.
 
@@ -98,6 +101,7 @@ Report mode does none of those mutations. It only prints counts and pseudonymous
 - Offer weekly or biweekly report-only reminders after the first successful apply; do not assume the user wants recurring maintenance.
 - When in doubt, leave a chat active or ask the user. Never archive a chat that is pinned, current, or explicitly marked as still needed without a handoff.
 - Treat title/preview repair as metadata repair only. The full rollout transcript remains in the session JSONL; bounded SQLite fields are for list/navigation display.
+- Treat malformed local task archiving as cleanup for synthetic/no-user-event sessions. It should not target normal chats with user events.
 
 ## Thread Metadata Bloat
 
@@ -116,6 +120,18 @@ That bounds active `threads.title` and `threads.first_user_message` values. Defa
 The targeted repair manifest stores the old full title/preview values so the change can be reversed. Treat `thread-metadata-repairs.jsonl`, `restore-thread-metadata.py`, and the whole backup folder as private local artifacts.
 
 This is a local maintenance workaround for metadata bloat. It does not solve app renderer hydration of very large rollout histories; that needs upstream staged/paged thread loading.
+
+## Malformed Local Task Sessions
+
+Codex Desktop can become slow when active local task rows have no user event and an unusable workspace root, such as `/` or an OS temp folder. Third-party app-server integrations can create this state. The visible symptom is repeated `No cwd found for local task` log lines for those conversation IDs while Desktop thread-list rendering becomes sluggish.
+
+The script reports these candidates in report mode and normal apply mode. Normal apply does not archive them. If the user explicitly opts in, after backups and only when Codex is not running, run:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-malformed-local-tasks
+```
+
+That moves matching rollout JSONL files into `~/.codex/archived_sessions/`, marks those rows archived in SQLite, and writes a restore manifest/script. The predicate requires `has_user_event=0`, an active/unarchived thread, a suspicious `cwd`, and a rollout file under `~/.codex/sessions`.
 
 ## Handoff Doc + Reactivation Prompt
 
@@ -179,6 +195,7 @@ The reminder should:
 - never archive, move, prune, rotate, normalize, delete, or mutate local Codex state
 - remind me to create comprehensive handoff docs and reactivation prompts for active repo chats before any manual apply
 - summarize active session size, archived session size, extended path candidates, old session candidates, worktree candidates, log size, and top Node/dev processes
+- summarize malformed local task candidates without archiving them
 - report heavy Node/dev processes without killing them
 - tell me that manual apply should only happen after I confirm handoffs exist or are not needed and Codex is closed
 ```
