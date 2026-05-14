@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import io
 import importlib.util
+import json
 import os
 import sqlite3
 import sys
@@ -83,6 +84,21 @@ def make_fake_home(root: Path) -> dict[str, Path]:
         "log_file": log_file,
         "state_db": state_db,
     }
+
+
+def latest_session_index_name(codex_home: Path, thread_id: str) -> str | None:
+    path = codex_home / "session_index.jsonl"
+    if not path.exists():
+        return None
+    name = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("id") == thread_id and record.get("thread_name"):
+            name = record["thread_name"]
+    return name
 
 
 def assert_report_mode(module) -> None:
@@ -183,6 +199,10 @@ def assert_apply_mode(module) -> None:
     with tempfile.TemporaryDirectory() as td:
         paths = make_fake_home(Path(td))
         backup = Path(td) / "backup-apply"
+        (paths["codex_home"] / "session_index.jsonl").write_text(
+            '{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","thread_name":"Friendly Agent","updated_at":"2026-01-01T00:00:00.000Z"}\n',
+            encoding="utf-8",
+        )
         args = argparse.Namespace(
             apply=True,
             backup_only=False,
@@ -210,7 +230,7 @@ def assert_apply_mode(module) -> None:
         assert archived_at is not None
         assert "archived_sessions" in rollout_path
         assert cwd == r"C:\DefinitelyMissingKeepCodexFast"
-        assert len(title) <= 120
+        assert title == "Friendly Agent"
         assert len(preview) <= 240
         assert not paths["rollout"].exists()
         assert not paths["worktree"].exists()
@@ -223,9 +243,70 @@ def assert_apply_mode(module) -> None:
         assert (backup / "moved-sessions.jsonl").exists()
         assert (backup / "thread-metadata-repairs.jsonl").exists()
         assert (backup / "moved-worktrees.jsonl").exists()
-        session_index = paths["codex_home"] / "session_index.jsonl"
-        assert session_index.exists()
-        assert "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" in session_index.read_text(encoding="utf-8")
+        assert latest_session_index_name(paths["codex_home"], "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa") == "Friendly Agent"
+
+
+def assert_repair_adds_bounded_name_when_no_existing_name(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        backup = Path(td) / "backup-repair-name"
+        args = argparse.Namespace(
+            apply=True,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(backup),
+            archive_older_than_days=10,
+            worktree_older_than_days=7,
+            rotate_logs_above_mb=64,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=True,
+        )
+        assert module.run(args) == 0
+        name = latest_session_index_name(paths["codex_home"], "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        assert name is not None
+        assert len(name) <= 120
+
+
+def assert_repair_restores_existing_name_when_title_is_already_bounded(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        backup = Path(td) / "backup-repair-existing-name"
+        conn = sqlite3.connect(paths["state_db"])
+        conn.execute(
+            "update threads set title=?, first_user_message=? where id=?",
+            ("Short prompt fallback", "Short preview", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        )
+        conn.commit()
+        conn.close()
+        (paths["codex_home"] / "session_index.jsonl").write_text(
+            '{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","thread_name":"Friendly Agent","updated_at":"2026-01-01T00:00:00.000Z"}\n',
+            encoding="utf-8",
+        )
+        args = argparse.Namespace(
+            apply=True,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(backup),
+            archive_older_than_days=10,
+            worktree_older_than_days=7,
+            rotate_logs_above_mb=64,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=True,
+        )
+        assert module.run(args) == 0
+        conn = sqlite3.connect(paths["state_db"])
+        title = conn.execute(
+            "select title from threads where id=?",
+            ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",),
+        ).fetchone()[0]
+        conn.close()
+        assert title == "Friendly Agent"
 
 
 def assert_normal_apply_does_not_repair_thread_metadata(module) -> None:
@@ -267,6 +348,8 @@ def main() -> int:
     assert_backup_only_mode(module)
     assert_session_alias_detection(module)
     assert_normal_apply_does_not_repair_thread_metadata(module)
+    assert_repair_adds_bounded_name_when_no_existing_name(module)
+    assert_repair_restores_existing_name_when_title_is_already_bounded(module)
     assert_apply_mode(module)
     print("smoke tests passed")
     return 0

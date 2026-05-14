@@ -255,6 +255,42 @@ def append_session_index_name(codex_home: Path, thread_id: str, name: str) -> No
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def latest_session_index_name(codex_home: Path, thread_id: str) -> str | None:
+    path = codex_home / "session_index.jsonl"
+    if not path.exists():
+        return None
+    latest = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("id") == thread_id and record.get("thread_name"):
+            latest = str(record["thread_name"])
+    return latest
+
+
+def should_append_repaired_session_index_name(
+    codex_home: Path,
+    item: ThreadMetadataRepair,
+) -> bool:
+    if not item.new_title or item.new_title == item.old_title:
+        return False
+    existing_name = latest_session_index_name(codex_home, item.thread_id)
+    return existing_name is None or existing_name == item.old_title
+
+
+def repaired_thread_title(codex_home: Path, thread_id: str, old_title: str, title_limit: int) -> str:
+    existing_name = latest_session_index_name(codex_home, thread_id)
+    if existing_name:
+        return bounded_text(existing_name, title_limit)
+    return bounded_text(old_title, title_limit)
+
+
 def report_thread_metadata_bloat(
     conn: sqlite3.Connection,
     *,
@@ -343,24 +379,20 @@ def repair_thread_metadata_bloat(
         select id, title, {select_preview}
         from threads
         where {archived_expr}
-          and (
-            length(title) > ?
-            {"or length(first_user_message) > ?" if has_preview else ""}
-          )
-        """,
-        (title_limit, preview_limit) if has_preview else (title_limit,),
+        """
     ).fetchall()
 
     repairs: list[ThreadMetadataRepair] = []
     for thread_id, title, preview in rows:
+        thread_id = str(thread_id)
         old_title = title or ""
         old_preview = preview or ""
-        new_title = bounded_text(old_title, title_limit)
+        new_title = repaired_thread_title(codex_home, thread_id, old_title, title_limit)
         new_preview = bounded_text(old_preview, preview_limit) if has_preview else ""
         if new_title != old_title or new_preview != old_preview:
             repairs.append(
                 ThreadMetadataRepair(
-                    str(thread_id),
+                    thread_id,
                     old_title,
                     new_title,
                     old_preview,
@@ -411,7 +443,7 @@ def repair_thread_metadata_bloat(
                 "update threads set title=? where id=?",
                 (item.new_title, item.thread_id),
             )
-        if item.new_title and item.new_title != item.old_title:
+        if should_append_repaired_session_index_name(codex_home, item):
             append_session_index_name(codex_home, item.thread_id, item.new_title)
     report("thread_metadata_repair applied")
     report(f"thread_metadata_repair_manifest {manifest}")

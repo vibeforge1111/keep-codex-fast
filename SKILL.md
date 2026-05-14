@@ -111,7 +111,7 @@ Normal apply mode reports metadata-bloat candidates but does not repair them. If
 python scripts/keep_codex_fast.py --apply --repair-thread-metadata-bloat
 ```
 
-That bounds active `threads.title` and `threads.first_user_message` values. Defaults are 120 characters for titles and 240 characters for previews. It also appends repaired titles to `session_index.jsonl`, matching current upstream name-update storage, so reconciliation/name lookup does not immediately prefer the old full-message fallback.
+That bounds active `threads.title` and `threads.first_user_message` values. Defaults are 120 characters for titles and 240 characters for previews. If a thread already has a friendly name in `session_index.jsonl`, the repair writes that name back into the SQLite display title instead of replacing it with a shortened prompt, including already-bounded prompt fallback titles from earlier repairs.
 
 The targeted repair manifest stores the old full title/preview values so the change can be reversed. Treat `thread-metadata-repairs.jsonl`, `restore-thread-metadata.py`, and the whole backup folder as private local artifacts.
 
