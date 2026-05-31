@@ -656,8 +656,30 @@ def move_stale_worktrees(codex_home: Path, backup_root: Path, days: int, stamp: 
             item_size = size_bytes(source)
             shutil.move(str(source), str(dest))
             handle.write(json.dumps({"from": str(source), "to": str(dest), "bytes": item_size}) + "\n")
+    write_worktree_restore_script(manifest, backup_root)
     report(f"worktree_archive_root {archive_root}")
     report(f"worktree_manifest {manifest}")
+
+
+def write_worktree_restore_script(manifest: Path, backup_root: Path) -> None:
+    restore = backup_root / "restore-worktrees.py"
+    restore.write_text(
+        f'''import json
+import shutil
+from pathlib import Path
+
+manifest = Path(r"{manifest}")
+for line in manifest.read_text(encoding="utf-8").splitlines():
+    rec = json.loads(line)
+    src = Path(rec["to"])
+    dest = Path(rec["from"])
+    if src.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+''',
+        encoding="utf-8",
+    )
+    report(f"worktree_restore_script {restore}")
 
 
 def rotate_logs(codex_home: Path, threshold_mb: int, stamp: str, apply: bool) -> None:
