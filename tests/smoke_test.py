@@ -220,6 +220,7 @@ def assert_apply_mode(module) -> None:
         )
         assert (backup / "restore-sessions.py").exists()
         assert (backup / "restore-thread-metadata.py").exists()
+        assert (backup / "restore-worktrees.py").exists()
         assert (backup / "moved-sessions.jsonl").exists()
         assert (backup / "thread-metadata-repairs.jsonl").exists()
         assert (backup / "moved-worktrees.jsonl").exists()
@@ -261,6 +262,44 @@ def assert_normal_apply_does_not_repair_thread_metadata(module) -> None:
         assert not (backup / "restore-thread-metadata.py").exists()
 
 
+def assert_worktree_restore_round_trip(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        codex_home = root / ".codex"
+        backup = root / "backup-worktree"
+        backup.mkdir(parents=True)
+        worktree = codex_home / "worktrees" / "oldtree" / "src"
+        worktree.mkdir(parents=True)
+        payload = worktree / "file.txt"
+        payload.write_text("worktree-payload", encoding="utf-8")
+        old_time = time.time() - 30 * 86400
+        os.utime(codex_home / "worktrees" / "oldtree", (old_time, old_time))
+
+        stamp = module.now_stamp()
+        module.move_stale_worktrees(codex_home, backup, days=7, stamp=stamp, apply=True)
+
+        # archived, not deleted
+        assert not (codex_home / "worktrees" / "oldtree").exists(), "stale worktree must be moved out of hot path"
+        archived = list((codex_home / "archived_worktrees").rglob("file.txt"))
+        assert len(archived) == 1, "worktree payload must exist in archive after apply"
+        assert archived[0].read_text(encoding="utf-8") == "worktree-payload"
+
+        manifest = backup / "moved-worktrees.jsonl"
+        restore = backup / "restore-worktrees.py"
+        assert manifest.exists(), "apply must write moved-worktrees manifest"
+        assert restore.exists(), "apply must write restore-worktrees.py"
+
+        # run the generated restore script and confirm the round-trip
+        import subprocess
+
+        result = subprocess.run([sys.executable, str(restore)], capture_output=True, text=True)
+        assert result.returncode == 0, f"restore script failed: {result.stderr}"
+        restored = codex_home / "worktrees" / "oldtree" / "src" / "file.txt"
+        assert restored.exists(), "restore must move worktree back to original path"
+        assert restored.read_text(encoding="utf-8") == "worktree-payload"
+        assert not list((codex_home / "archived_worktrees").rglob("file.txt")), "archive must be emptied after restore"
+
+
 def main() -> int:
     module = load_module()
     assert_report_mode(module)
@@ -268,6 +307,7 @@ def main() -> int:
     assert_session_alias_detection(module)
     assert_normal_apply_does_not_repair_thread_metadata(module)
     assert_apply_mode(module)
+    assert_worktree_restore_round_trip(module)
     print("smoke tests passed")
     return 0
 
