@@ -432,7 +432,13 @@ conn.execute("pragma busy_timeout=10000")
 cols = {{row[1] for row in conn.execute('pragma table_info("threads")').fetchall()}}
 has_preview = "first_user_message" in cols
 for line in manifest.read_text(encoding="utf-8").splitlines():
-    rec = json.loads(line)
+    if not line.strip():
+        continue
+    try:
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        print(f"Skipping malformed manifest line: {line[:80]}", flush=True)
+        continue
     if has_preview:
         conn.execute(
             "update threads set title=?, first_user_message=? where id=?",
