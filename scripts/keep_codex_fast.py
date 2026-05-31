@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -249,7 +249,7 @@ def append_session_index_name(codex_home: Path, thread_id: str, name: str) -> No
     entry = {
         "id": thread_id,
         "thread_name": name,
-        "updated_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+        "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="milliseconds") + "Z",
     }
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
