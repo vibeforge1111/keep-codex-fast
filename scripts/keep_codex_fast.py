@@ -846,6 +846,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="With --apply, trim oversized thread title/preview metadata. Default --apply only reports candidates.",
     )
+    parser.add_argument("--no-report", action="store_true", help="Skip report generation")
     args = parser.parse_args(argv)
     if args.apply and args.backup_only:
         parser.error("--apply and --backup-only cannot be used together")
