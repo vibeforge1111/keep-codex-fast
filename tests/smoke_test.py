@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,9 +26,156 @@ def load_module():
     sys.modules["keep_codex_fast"] = module
     assert spec.loader is not None
     spec.loader.exec_module(module)
+
+    module._real_top_node_processes = module.top_node_processes
     module.codex_processes_running = lambda: []
-    module.top_node_processes = lambda details=False: module.report("top_node_processes skipped_in_smoke")
+
+    def top_node_processes_stub(details=False):
+        module.report("top_node_processes skipped_in_smoke")
+        return True
+
+    module.top_node_processes = top_node_processes_stub
     return module
+
+
+def assert_top_node_processes_helper(module) -> None:
+    helper = module._real_top_node_processes
+    captured_commands = []
+
+    def empty_windows_result(command, **kwargs):
+        captured_commands.append(command)
+        assert kwargs.get("text") is True
+        return "[]"
+
+    output = io.StringIO()
+    with mock.patch.object(module.platform, "system", return_value="Windows"):
+        with mock.patch.object(
+            module.subprocess,
+            "check_output",
+            side_effect=empty_windows_result,
+        ):
+            with contextlib.redirect_stdout(output):
+                assert helper(False) is True
+
+    command_text = captured_commands[0][-1]
+    assert "$processes = @(" in command_text
+    assert "if ($processes.Count -eq 0)" in command_text
+    assert "Write-Output '[]'" in command_text
+    assert "exit 0" in command_text
+
+    output = io.StringIO()
+    with mock.patch.object(module.platform, "system", return_value="Windows"):
+        with mock.patch.object(
+            module.subprocess,
+            "check_output",
+            return_value="",
+        ):
+            with contextlib.redirect_stdout(output):
+                assert helper(False) is False
+
+    text = output.getvalue()
+    assert "node_process_report_skipped empty PowerShell process output" in text
+
+    output = io.StringIO()
+    with mock.patch.object(module.platform, "system", return_value="Windows"):
+        with mock.patch.object(
+            module.subprocess,
+            "check_output",
+            return_value="null",
+        ):
+            with contextlib.redirect_stdout(output):
+                assert helper(False) is False
+
+    text = output.getvalue()
+    assert "node_process_report_skipped unexpected PowerShell JSON null" in text
+
+    output = io.StringIO()
+    with mock.patch.object(module.platform, "system", return_value="Windows"):
+        with mock.patch.object(
+            module.subprocess,
+            "check_output",
+            return_value="{not-json",
+        ):
+            with contextlib.redirect_stdout(output):
+                assert helper(False) is False
+
+    text = output.getvalue()
+    assert "node_process_report_skipped malformed PowerShell JSON" in text
+
+    windows_payloads = [
+        (
+            '{"Id":123,"ProcessName":"node","MB":12.5,'
+            '"Path":"C:\\\\secret\\\\node.exe"}'
+        ),
+        (
+            '[{"Id":123,"ProcessName":"node","MB":12.5,'
+            '"Path":"C:\\\\secret\\\\node.exe"}]'
+        ),
+    ]
+    for payload in windows_payloads:
+        output = io.StringIO()
+        with mock.patch.object(module.platform, "system", return_value="Windows"):
+            with mock.patch.object(
+                module.subprocess,
+                "check_output",
+                return_value=payload,
+            ):
+                with contextlib.redirect_stdout(output):
+                    assert helper(False) is True
+
+        text = output.getvalue()
+        assert "node_mb 12.5 process=node" in text
+        assert "pid=123" not in text
+        assert r"C:\secret\node.exe" not in text
+
+    output = io.StringIO()
+    with mock.patch.object(module.platform, "system", return_value="Windows"):
+        with mock.patch.object(
+            module.subprocess,
+            "check_output",
+            return_value="[null]",
+        ):
+            with contextlib.redirect_stdout(output):
+                assert helper(False) is False
+
+    text = output.getvalue()
+    assert "node_process_report_skipped unexpected PowerShell process row" in text
+
+    output = io.StringIO()
+    with mock.patch.object(module.platform, "system", return_value="Windows"):
+        with mock.patch.object(
+            module.subprocess,
+            "check_output",
+            side_effect=OSError("process query unavailable"),
+        ):
+            with contextlib.redirect_stdout(output):
+                assert helper(False) is False
+
+    text = output.getvalue()
+    assert "node_process_report_skipped process query unavailable" in text
+
+    output = io.StringIO()
+    with mock.patch.object(module.platform, "system", return_value="Linux"):
+        with mock.patch.object(
+            module.subprocess,
+            "check_output",
+            return_value="",
+        ):
+            with contextlib.redirect_stdout(output):
+                assert helper(False) is True
+
+    output = io.StringIO()
+    with mock.patch.object(module.platform, "system", return_value="Linux"):
+        with mock.patch.object(
+            module.subprocess,
+            "check_output",
+            return_value="123 2048 node node server.js\n",
+        ):
+            with contextlib.redirect_stdout(output):
+                assert helper(False) is True
+
+    text = output.getvalue()
+    assert "node_mb 2.0 process=node" in text
 
 
 def make_fake_home(root: Path) -> dict[str, Path]:
@@ -107,6 +255,19 @@ def assert_report_mode(module) -> None:
         with contextlib.redirect_stdout(output):
             assert module.run(args) == 0
         text = output.getvalue()
+        terminal_lines = [
+            "done",
+            "result_schema_version 1",
+            "overall_status_scope KEEP_CODEX_FAST_REPORT_PILOT",
+            "required_check top_node_processes PASS",
+            "overall_status COMPLETE",
+            "overall_status_zh 已完成",
+            "next_action NONE",
+        ]
+        assert text.rstrip().splitlines()[-len(terminal_lines):] == terminal_lines
+        assert "required_check top_node_processes FAIL" not in text
+        assert "overall_status PARTIAL" not in text
+        assert "issue top_node_processes REQUIRED_CHECK_FAILED" not in text
         assert paths["rollout"].exists(), "report mode must not move sessions"
         assert paths["worktree"].exists(), "report mode must not move worktrees"
         assert paths["log_file"].exists(), "report mode must not rotate logs"
@@ -122,6 +283,89 @@ def assert_report_mode(module) -> None:
         assert len(title) > 120, "report mode must not trim titles"
         assert len(preview) > 240, "report mode must not trim previews"
 
+
+def assert_partial_required_check(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        args = argparse.Namespace(
+            apply=False,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(Path(td) / "backup-partial"),
+            archive_older_than_days=10,
+            worktree_older_than_days=7,
+            rotate_logs_above_mb=0,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=False,
+        )
+
+        original = module.top_node_processes
+        output = io.StringIO()
+        try:
+            module.top_node_processes = lambda details=False: False
+            with contextlib.redirect_stdout(output):
+                exit_code = module.run(args)
+        finally:
+            module.top_node_processes = original
+
+        text = output.getvalue()
+        terminal_lines = [
+            "done",
+            "result_schema_version 1",
+            "overall_status_scope KEEP_CODEX_FAST_REPORT_PILOT",
+            "required_check top_node_processes FAIL",
+            "issue top_node_processes REQUIRED_CHECK_FAILED",
+            "issue_zh top_node_processes 必需检查失败；核心维护报告仍可使用",
+            "overall_status PARTIAL",
+            "overall_status_zh 部分完成",
+            "next_action RETRY_REQUIRED_STEP",
+        ]
+
+        assert exit_code == 0
+        assert text.rstrip().splitlines()[-len(terminal_lines):] == terminal_lines
+        assert "required_check top_node_processes PASS" not in text
+        assert "overall_status COMPLETE" not in text
+        assert "next_action NONE" not in text
+
+
+def assert_missing_codex_home_preserves_early_exit(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        missing_home = Path(td) / "missing-codex-home"
+        args = argparse.Namespace(
+            apply=False,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(missing_home),
+            backup_root=str(Path(td) / "unused-backup"),
+            archive_older_than_days=10,
+            worktree_older_than_days=7,
+            rotate_logs_above_mb=0,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=False,
+        )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = module.run(args)
+
+        text = output.getvalue()
+        lines = text.rstrip().splitlines()
+
+        assert exit_code == 2
+        assert lines == [f"codex_home_missing {missing_home.resolve()}"]
+        assert "done" not in lines
+        assert "result_schema_version 1" not in text
+        assert "overall_status_scope KEEP_CODEX_FAST_REPORT_PILOT" not in text
+        assert "required_check top_node_processes" not in text
+        assert "overall_status COMPLETE" not in text
+        assert "overall_status PARTIAL" not in text
+        assert "next_action NONE" not in text
+        assert "next_action RETRY_REQUIRED_STEP" not in text
 
 def assert_backup_only_mode(module) -> None:
     with tempfile.TemporaryDirectory() as td:
@@ -263,6 +507,9 @@ def assert_normal_apply_does_not_repair_thread_metadata(module) -> None:
 
 def main() -> int:
     module = load_module()
+    assert_top_node_processes_helper(module)
+    assert_missing_codex_home_preserves_early_exit(module)
+    assert_partial_required_check(module)
     assert_report_mode(module)
     assert_backup_only_mode(module)
     assert_session_alias_detection(module)

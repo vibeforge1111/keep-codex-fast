@@ -76,6 +76,54 @@ python scripts/keep_codex_fast.py
 
 If the user wants automation and the Codex app automation tool is available, create only a recurring report/reminder automation. Do not recommend recurring mutating maintenance, because automation cannot know whether the user created handoffs. The prompt must say not to pass `--apply`, not to archive/move/prune/rotate/normalize/delete/mutate local state, and to remind the user that manual apply should happen only after handoffs are confirmed and Codex is closed.
 
+## Report Result Contract
+
+This is the narrow V1 pilot for #16A. It classifies one existing required
+report field and does not implement the full four-state result contract.
+
+The terminal result block uses:
+
+```text
+result_schema_version 1
+overall_status_scope KEEP_CODEX_FAST_REPORT_PILOT
+```
+
+`overall_status` in this block is scoped only to
+`KEEP_CODEX_FAST_REPORT_PILOT`. It must not be promoted to a claim that every
+legacy report, backup, apply, or validation path has been classified by this
+pilot.
+
+When `run()` reaches its normal finalization:
+
+- `top_node_processes` is the only check classified as `required` by this pilot.
+- `overall_status COMPLETE` means the normal run reached finalization and
+  `top_node_processes` completed.
+- `overall_status PARTIAL` means the normal run reached finalization, but
+  `top_node_processes` failed.
+- A successful process query that finds no Node process is a successful required
+  check. On Windows, the PowerShell command must represent that result as the
+  JSON empty array `[]`.
+- Empty Windows stdout, JSON `null`, malformed JSON, an unexpected JSON shape,
+  or a process-query exception is a failed required check. Do not interpret
+  those cases as “no Node process”.
+- A process exit code of `0` preserves existing CLI compatibility; it does not
+  override `PARTIAL`, and consumers must read the terminal result block.
+- `done` is emitted before the terminal result block. No report output may be
+  emitted after that block.
+- If the process exits before emitting the terminal result block, consumers
+  must not infer `COMPLETE`.
+- Existing early-exit behavior is preserved. For example, a missing Codex home
+  still emits `codex_home_missing`, returns exit code `2`, and does not emit a
+  terminal result block.
+- This pilot does not emit `FAILED` or `NOT_VALIDATED`; it does not redefine
+  those states in the common contract.
+- Existing `*_missing` and `*_skipped` lines are not newly classified by this
+  pilot and must not be described as covered by it.
+- For `PARTIAL`, the terminal block must identify `top_node_processes`, include
+  a Chinese result line, and recommend `RETRY_REQUIRED_STEP`.
+- This pilot does not change exit-code compatibility and does not authorize
+  Automation or memory writes.
+
 ## What Apply Does
 
 - Backs up important metadata to `~/Documents/Codex/codex-backups/keep-codex-fast-*`.

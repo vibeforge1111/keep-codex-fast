@@ -675,29 +675,56 @@ def rotate_logs(codex_home: Path, threshold_mb: int, stamp: str, apply: bool) ->
         report(f"logs_archive_root {archive_root}")
 
 
-def top_node_processes(details: bool) -> None:
+def top_node_processes(details: bool) -> bool:
     system = platform.system()
     report("top_node_processes")
     try:
         if system == "Windows":
             command = (
-                "Get-Process node -ErrorAction SilentlyContinue | "
+                "$processes = @(Get-Process node -ErrorAction SilentlyContinue); "
+                "if ($processes.Count -eq 0) { Write-Output '[]'; exit 0 }; "
+                "$processes | "
                 "Sort-Object WorkingSet64 -Descending | Select-Object -First 10 "
                 "Id,ProcessName,@{n='MB';e={[math]::Round($_.WorkingSet64/1MB,1)}},Path | "
                 "ConvertTo-Json -Compress"
             )
-            output = subprocess.check_output(["powershell", "-NoProfile", "-Command", command], text=True)
+            output = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command", command],
+                text=True,
+            )
             if not output.strip():
-                return
-            data = json.loads(output)
-            rows = data if isinstance(data, list) else [data]
+                raise ValueError("empty PowerShell process output")
+
+            try:
+                data = json.loads(output)
+            except json.JSONDecodeError as exc:
+                raise ValueError("malformed PowerShell JSON") from exc
+
+            if data is None:
+                raise ValueError("unexpected PowerShell JSON null")
+            if isinstance(data, dict):
+                rows = [data]
+            elif isinstance(data, list):
+                rows = data
+            else:
+                raise ValueError("unexpected PowerShell JSON shape")
+
             for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError("unexpected PowerShell process row")
                 if details:
-                    report(f"node_mb {row.get('MB')} pid={row.get('Id')} path={row.get('Path')}")
+                    report(
+                        f"node_mb {row.get('MB')} "
+                        f"pid={row.get('Id')} path={row.get('Path')}"
+                    )
                 else:
                     report(f"node_mb {row.get('MB')} process=node")
-            return
-        output = subprocess.check_output(["ps", "-axo", "pid=,rss=,comm=,args="], text=True)
+            return True
+
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid=,rss=,comm=,args="],
+            text=True,
+        )
         rows = []
         for line in output.splitlines():
             parts = line.strip().split(None, 3)
@@ -708,8 +735,10 @@ def top_node_processes(details: bool) -> None:
                 report(f"node_mb {rss / 1024:.1f} {line}")
             else:
                 report(f"node_mb {rss / 1024:.1f} process=node")
+        return True
     except Exception as exc:
         report(f"node_process_report_skipped {exc}")
+        return False
 
 
 def verify_sizes(codex_home: Path) -> None:
@@ -803,8 +832,25 @@ def run(args: argparse.Namespace) -> int:
     move_stale_worktrees(codex_home, backup_root, args.worktree_older_than_days, stamp, effective_apply)
     rotate_logs(codex_home, args.rotate_logs_above_mb, stamp, effective_apply)
     verify_sizes(codex_home)
-    top_node_processes(args.details)
+    node_processes_ok = top_node_processes(args.details)
+
     report("done")
+    report("result_schema_version 1")
+    report("overall_status_scope KEEP_CODEX_FAST_REPORT_PILOT")
+
+    if node_processes_ok:
+        report("required_check top_node_processes PASS")
+        report("overall_status COMPLETE")
+        report("overall_status_zh 已完成")
+        report("next_action NONE")
+    else:
+        report("required_check top_node_processes FAIL")
+        report("issue top_node_processes REQUIRED_CHECK_FAILED")
+        report("issue_zh top_node_processes 必需检查失败；核心维护报告仍可使用")
+        report("overall_status PARTIAL")
+        report("overall_status_zh 部分完成")
+        report("next_action RETRY_REQUIRED_STEP")
+
     return 0
 
 
