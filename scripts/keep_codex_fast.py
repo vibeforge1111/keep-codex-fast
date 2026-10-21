@@ -800,7 +800,8 @@ def run(args: argparse.Namespace) -> int:
         report("state_db_missing")
 
     prune_config(codex_home, backup_root, effective_apply, effective_backup)
-    move_stale_worktrees(codex_home, backup_root, args.worktree_older_than_days, stamp, effective_apply)
+    # Directory age alone cannot establish that a worktree is inactive.
+    move_stale_worktrees(codex_home, backup_root, args.worktree_older_than_days, stamp, apply=False)
     rotate_logs(codex_home, args.rotate_logs_above_mb, stamp, effective_apply)
     verify_sizes(codex_home)
     top_node_processes(args.details)
@@ -812,7 +813,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Safe, backup-first, archive-only Codex local-state maintenance."
     )
-    parser.add_argument("--apply", action="store_true", help="Apply maintenance actions. Default is report-only.")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply maintenance actions. Worktrees remain report-only. Default is report-only.",
+    )
     parser.add_argument(
         "--backup-only",
         action="store_true",
@@ -827,7 +832,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--codex-home", help="Override Codex home. Defaults to CODEX_HOME or ~/.codex.")
     parser.add_argument("--backup-root", help="Override backup output folder.")
     parser.add_argument("--archive-older-than-days", type=int, default=10)
-    parser.add_argument("--worktree-older-than-days", type=int, default=7)
+    parser.add_argument(
+        "--worktree-older-than-days",
+        type=int,
+        default=7,
+        help="Age threshold for reporting worktree candidates; worktrees are never moved by maintenance.",
+    )
     parser.add_argument("--rotate-logs-above-mb", type=int, default=64)
     parser.add_argument(
         "--thread-title-limit",

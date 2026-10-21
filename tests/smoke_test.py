@@ -213,7 +213,9 @@ def assert_apply_mode(module) -> None:
         assert len(title) <= 120
         assert len(preview) <= 240
         assert not paths["rollout"].exists()
-        assert not paths["worktree"].exists()
+        assert paths["worktree"].is_dir(), "apply must not move worktrees"
+        assert (paths["worktree"] / "file.txt").read_text(encoding="utf-8") == "x"
+        assert not (paths["codex_home"] / "archived_worktrees").exists()
         assert not paths["log_file"].exists()
         assert "DefinitelyMissingKeepCodexFast" not in (paths["codex_home"] / "config.toml").read_text(
             encoding="utf-8"
@@ -222,7 +224,7 @@ def assert_apply_mode(module) -> None:
         assert (backup / "restore-thread-metadata.py").exists()
         assert (backup / "moved-sessions.jsonl").exists()
         assert (backup / "thread-metadata-repairs.jsonl").exists()
-        assert (backup / "moved-worktrees.jsonl").exists()
+        assert not (backup / "moved-worktrees.jsonl").exists()
         session_index = paths["codex_home"] / "session_index.jsonl"
         assert session_index.exists()
         assert "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" in session_index.read_text(encoding="utf-8")
@@ -231,6 +233,11 @@ def assert_apply_mode(module) -> None:
 def assert_normal_apply_does_not_repair_thread_metadata(module) -> None:
     with tempfile.TemporaryDirectory() as td:
         paths = make_fake_home(Path(td))
+        # Editing an existing file does not refresh the worktree root's mtime.
+        worktree_mtime = paths["worktree"].stat().st_mtime
+        worktree_file = paths["worktree"] / "file.txt"
+        worktree_file.write_text("recent uncommitted work", encoding="utf-8")
+        assert paths["worktree"].stat().st_mtime == worktree_mtime
         backup = Path(td) / "backup-normal-apply"
         args = argparse.Namespace(
             apply=True,
@@ -259,6 +266,10 @@ def assert_normal_apply_does_not_repair_thread_metadata(module) -> None:
         assert len(preview) > 240, "normal apply must not trim previews without explicit repair flag"
         assert not (backup / "thread-metadata-repairs.jsonl").exists()
         assert not (backup / "restore-thread-metadata.py").exists()
+        assert paths["worktree"].is_dir(), "normal apply must not move worktrees with old root mtimes"
+        assert worktree_file.read_text(encoding="utf-8") == "recent uncommitted work"
+        assert not (paths["codex_home"] / "archived_worktrees").exists()
+        assert not (backup / "moved-worktrees.jsonl").exists()
 
 
 def main() -> int:

@@ -26,7 +26,7 @@
     <text x="48" y="61" class="check" font-size="29">1</text>
     <rect x="118" y="0" width="990" height="100" rx="24" class="panel"/>
     <text x="152" y="40" class="ink" font-size="27" font-weight="780">Get a report</text>
-    <text x="152" y="72" class="muted" font-size="20">Codex shows large sessions, stale worktrees, logs, path issues, and Node processes. No changes yet.</text>
+    <text x="152" y="72" class="muted" font-size="20">Codex shows large sessions, old worktree candidates, logs, path issues, and Node processes.</text>
   </g>
 
   <g transform="translate(84 320)">
@@ -51,7 +51,7 @@
     <text x="48" y="61" class="check" font-size="29">4</text>
     <rect x="118" y="0" width="990" height="100" rx="24" class="green"/>
     <text x="152" y="40" class="ink" font-size="27" font-weight="780">Archive safely</text>
-    <text x="152" y="72" class="muted" font-size="20">Old sessions, stale worktrees, and large logs move to archives. They are not deleted.</text>
+    <text x="152" y="72" class="muted" font-size="20">Old sessions and large logs move to archives. Worktrees stay in place for separate review.</text>
   </g>
 
   <g transform="translate(202 760)">

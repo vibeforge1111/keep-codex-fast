@@ -13,7 +13,7 @@ The rule is simple:
 ## Three Modes
 
 - **Inspect:** report-only, no writes.
-- **Maintain:** normal apply; backs up, archives old sessions, moves stale worktrees, rotates logs, prunes dead config, and normalizes paths. It does not trim thread title/preview metadata.
+- **Maintain:** normal apply; backs up, archives old sessions, reports worktree candidates, rotates logs, prunes dead config, and normalizes paths. It does not trim thread title/preview metadata.
 - **Optional repair:** only with `--apply --repair-thread-metadata-bloat`; shortens oversized SQLite display title/preview metadata after backup. The transcript stays intact.
 
 ## Who This Is For
@@ -37,7 +37,7 @@ It helps Codex:
 - back up important state before applying changes
 - archive old chats instead of deleting them
 - detect pathological thread title/preview metadata that can slow chat navigation
-- move stale worktrees out of the hot path
+- report old worktree candidates and their size for separate review
 - rotate large logs
 - prune dead project references
 - report heavy Node/dev processes without killing them
@@ -97,7 +97,7 @@ Use $keep-codex-fast to apply safe Codex maintenance.
 
 Before changing anything, confirm that important active repo chats have handoff docs or do not need them.
 
-Then back up first, archive instead of deleting, move stale worktrees, rotate large logs, prune dead config references, and verify the result.
+Then back up first, archive old sessions instead of deleting them, report worktree candidates for separate review, rotate large logs, prune dead config references, and verify the result.
 
 If Codex is currently running, do not mutate local state. Tell me to close Codex first.
 ```
@@ -183,6 +183,8 @@ Apply core maintenance actions. This does not trim thread title/preview metadata
 python scripts/keep_codex_fast.py --apply --archive-older-than-days 10 --worktree-older-than-days 7
 ```
 
+Worktrees remain report-only in every mode, including `--apply`. The `--worktree-older-than-days` option controls which candidates are reported. Directory modification time alone does not prove that a worktree is inactive; this script does not check uncommitted work or repair Git links after a move.
+
 Optionally repair oversized title/preview metadata only when the report recommends it:
 
 ```bash
@@ -200,13 +202,12 @@ python scripts/keep_codex_fast.py --apply --wait-for-codex-exit
 The skill can safely handle:
 
 - old non-pinned active sessions
-- stale worktrees
 - large `logs_2.sqlite*` files
 - dead/temp project entries in `config.toml`
 - Windows `\\?\C:\...` path mismatches in local SQLite text fields
 - oversized thread title and first-message preview metadata in `state_5.sqlite`, only with `--repair-thread-metadata-bloat`
 
-It does not permanently delete chats, logs, or worktrees. It moves them into archive folders and writes backup/restore artifacts before applying changes.
+It does not permanently delete chats or logs. It moves them into archive folders and writes backup/restore artifacts before applying changes. Worktrees are reported for separate review and stay in place.
 
 ## Mental Model
 

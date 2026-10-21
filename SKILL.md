@@ -1,6 +1,6 @@
 ---
 name: "keep-codex-fast"
-description: "Use when Codex feels slow or bloated, when local sessions/logs/worktrees/config have grown over time, or when a user wants safe maintenance for Codex Desktop/CLI state. Provides a read-only report by default, backs up before applying changes, archives instead of deleting, normalizes Windows extended paths, prunes dead config projects, rotates large logs, and moves stale worktrees."
+description: "Use when Codex feels slow or bloated, when local sessions/logs/worktrees/config have grown over time, or when a user wants safe maintenance for Codex Desktop/CLI state. Provides a read-only report by default, backs up before applying changes, archives instead of deleting, normalizes Windows extended paths, prunes dead config projects, rotates large logs, and reports old worktree candidates."
 metadata:
   short-description: "Safe Codex local-state maintenance"
 ---
@@ -17,7 +17,8 @@ Primary principle: preserve continuity before applying changes. For active repo 
 - The first run must be report-only. Report mode must not write files, create backups, move folders, or change local Codex state.
 - Back up before applying changes. Use `--backup-only` when the user wants backups without moving or changing local state.
 - Archive or move files instead of deleting them. Do not permanently delete user chats, logs, worktrees, memories, skills, plugins, or automations.
-- Write manifests and restore scripts when sessions/worktrees are moved.
+- Write manifests and restore scripts when sessions are moved.
+- Keep worktrees report-only in every mode, including `--apply`. Directory modification time alone does not prove inactivity; the script does not check uncommitted work or repair Git links after a move.
 - If Codex is running, default to report-only. Apply changes only after Codex is closed or when the user explicitly accepts waiting for Codex to exit.
 - Never modify or copy credential files unless the user explicitly asks for that. Back up memory/skill/plugin/automation files before touching local state.
 - Treat backup folders as private local artifacts because they can contain Codex metadata. Do not ask users to publish or share backups unless they have reviewed them first.
@@ -31,7 +32,7 @@ Primary principle: preserve continuity before applying changes. For active repo 
 There are three modes:
 
 - Inspect: report-only, no writes.
-- Maintain: normal `--apply`; backs up, archives old sessions, moves stale worktrees, rotates logs, prunes dead config, and normalizes paths. It does not trim thread title/preview metadata.
+- Maintain: normal `--apply`; backs up, archives old sessions, reports worktree candidates, rotates logs, prunes dead config, and normalizes paths. It does not trim thread title/preview metadata.
 - Optional repair: `--apply --repair-thread-metadata-bloat`; shortens oversized SQLite display title/preview metadata after backup. The rollout transcript stays intact.
 
 ## Default Workflow
@@ -48,7 +49,7 @@ python scripts/keep_codex_fast.py
    - archived session size
    - largest active sessions
    - thread metadata bloat: active title/preview character totals, max title/preview lengths, and over-limit counts
-   - stale worktree candidates
+   - old worktree candidates and their size for separate review
    - log size
    - bad Windows `\\?\` path counts
    - config project prune candidates
@@ -82,7 +83,7 @@ If the user wants automation and the Codex app automation tool is available, cre
 - Archives old non-pinned sessions to `~/.codex/archived_sessions/`.
 - Normalizes Windows extended paths like `\\?\C:\...` inside local SQLite text fields.
 - Prunes missing/temp project blocks from `config.toml` and writes UTF-8 without BOM.
-- Moves stale worktrees to `~/.codex/archived_worktrees/`.
+- Reports old worktree candidates and their size without moving them. `--worktree-older-than-days` controls the reporting threshold only.
 - Rotates `logs_2.sqlite*` into `~/.codex/archived_logs/` only when above the threshold.
 - Reports heavy Node processes without killing them.
 - Reports pathological active thread titles and `first_user_message` previews. It only repairs them when the user explicitly opts in with `--repair-thread-metadata-bloat`.
@@ -200,7 +201,7 @@ Avoid these behaviors:
 
 ## User-Facing Caution
 
-Tell users this does not permanently delete chats, worktrees, or logs. It moves them into archive folders and writes restore helpers. The only removed content is stale metadata, such as project entries pointing to folders that no longer exist, and even that happens after backing up `config.toml`.
+Tell users this does not permanently delete chats or logs. It moves them into archive folders and writes restore helpers. Worktrees are reported for separate review and stay in place. The only removed content is stale metadata, such as project entries pointing to folders that no longer exist, and even that happens after backing up `config.toml`.
 
 Also tell users that thread title/preview bloat repair is not part of normal apply. Normal use only reports title/preview bloat. Recommend `--repair-thread-metadata-bloat` only as an optional extra when the report shows large metadata payloads and the user understands that SQLite display metadata will be shortened while the real transcript remains in rollout JSONL.
 
